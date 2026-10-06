@@ -26,8 +26,9 @@ body {
   color: #f7f3e8;
   background: #1f7a3a;
   box-shadow: inset 0 0 0 12px #186430, 0 18px 36px rgba(23, 32, 22, 0.14);
-  font-size: clamp(2.2rem, 7vw, 3rem);
+  font-size: clamp(1.8rem, 5vw, 2.5rem);
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .tile:hover {
@@ -37,4 +38,23 @@ body {
 .tile:focus-visible {
   outline: 3px solid #e2a30b;
   outline-offset: 6px;
+}
+
+.back {
+  display: inline-block;
+  margin: 16px 16px 0;
+  color: inherit;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.soon {
+  min-height: calc(100vh - 60px);
+  display: grid;
+  place-items: center;
+}
+
+.soon h1 {
+  margin: 0;
+  font-size: clamp(2.2rem, 7vw, 3rem);
 }
