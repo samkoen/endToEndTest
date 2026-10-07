@@ -250,7 +250,7 @@ function stage(car) {
   const photoMode = state.view !== "model";
   const visual = photoMode
     ? photo(car, true)
-    : `<div class="viewer"><iframe title="תלת־ממד ${car.brand} ${car.name}" src="https://sketchfab.com/models/${car.model}/embed?autostart=1&preload=1&ui_infos=0&ui_help=0&ui_settings=0&ui_inspector=0&ui_vr=0&ui_annotations=0&dnt=1" allow="autoplay; fullscreen; xr-spatial-tracking" allowfullscreen></iframe></div>
+    : `<div class="viewer"><iframe title="תלת־ממד ${car.brand} ${car.name}" allow="autoplay; fullscreen; xr-spatial-tracking" allowfullscreen></iframe></div>
        <p class="hint">גררו כדי לסובב. גלגלו או צבטו כדי להתקרב.</p>`;
   const credit = photoMode
     ? `צילום: <a href="${car.source}">${car.credit}</a>, <a href="${car.licenseUrl}">${car.license}</a>`
@@ -313,9 +313,139 @@ function designer(car) {
     </section>`;
 }
 
+const WHEEL_FINISH = {
+  classic: { hex: "#d5d7dc", metal: 1, rough: 0.22 },
+  sport: { hex: "#141416", metal: 1, rough: 0.08 },
+  turbine: { hex: "#7e848c", metal: 0.95, rough: 0.16 },
+};
+
+let viewerToken = 0;
+let viewerApi = null;
+let viewerReady = false;
+let paintRequest = 0;
+let materialRoles = null;
+
+function hexToLinear(hex) {
+  const value = parseInt(hex.slice(1), 16);
+  return [16, 8, 0].map((shift) => Math.pow(((value >> shift) & 255) / 255, 2.2));
+}
+
+function kindOf(name) {
+  const text = String(name || "").toLowerCase();
+  if (!text) return "";
+  if (/translucent|glass|window|windshield|windscreen/.test(text)) return "glass";
+  if (/tire|tyre|rubber|reifen/.test(text)) return "skip";
+  if (/wheel|rim|alloy|felge|spoke/.test(text)) return "wheel";
+  if (/seat|leather|interior|cabin|upholstery|dashboard|stitch|alcantara|cockpit/.test(text)) return "interior";
+  if (/roof|hardtop|softtop|\bdach\b/.test(text)) return "roof";
+  if (/light|lamp|headlamp|taillight|indicator|blinker|\bled\b|bulb/.test(text)) return "skip";
+  if (/plate|license|logo|badge|emblem|decal|caliper|brake|engine|exhaust|chrome|grille|grill|mirror/.test(text)) return "skip";
+  if (/ground|floor|shadow|road|sky|environment|studio|backdrop/.test(text)) return "skip";
+  if (/paint|body|exterior|carpaint|chassis|shell|bonnet|hood|door|fender|bumper|panel|carriage/.test(text)) return "body";
+  return "";
+}
+
+function roleOf(material) {
+  const channels = material.channels || {};
+  const named = kindOf(material.name);
+  if (named === "glass" || named === "skip" || named === "roof" || named === "interior" || named === "wheel") return named;
+  const opacity = channels.Opacity && channels.Opacity.factor;
+  if (typeof opacity === "number" && opacity < 0.6) return "glass";
+  if (channels.ClearCoat && channels.ClearCoat.enable) return "body";
+  if (named === "body") return "body";
+  const metal = channels.MetalnessPBR && channels.MetalnessPBR.factor;
+  const rough = channels.RoughnessPBR && channels.RoughnessPBR.factor;
+  const albedo = channels.AlbedoPBR || channels.DiffusePBR || channels.DiffuseColor || {};
+  const color = albedo.color;
+  const dark = Array.isArray(color) && color[0] < 0.08 && color[1] < 0.08 && color[2] < 0.08;
+  if (dark && (metal || 0) < 0.25 && (rough || 0) < 0.3) return "roof";
+  if (typeof metal === "number" && metal > 0.9 && typeof rough === "number" && rough < 0.25) return "wheel";
+  if (typeof metal === "number" && metal < 0.2 && typeof rough === "number" && rough > 0.7) return "interior";
+  return "skip";
+}
+
+function solidColor(material, rgb, metal, rough) {
+  const channels = material.channels || {};
+  const albedo = channels.AlbedoPBR || channels.DiffusePBR || channels.DiffuseColor;
+  if (!albedo) return;
+  albedo.enable = true;
+  albedo.factor = 1;
+  albedo.color = rgb;
+  albedo.texture = null;
+  if (channels.MetalnessPBR) {
+    channels.MetalnessPBR.enable = true;
+    channels.MetalnessPBR.factor = metal;
+    channels.MetalnessPBR.texture = null;
+  }
+  if (channels.RoughnessPBR) {
+    channels.RoughnessPBR.enable = true;
+    channels.RoughnessPBR.factor = rough;
+    channels.RoughnessPBR.texture = null;
+  }
+  viewerApi.setMaterial(material);
+}
+
+function applyDesign() {
+  if (!viewerApi || !viewerReady) return;
+  const request = ++paintRequest;
+  const body = hexToLinear(byId(COLORS, state.body).hex);
+  const roof = state.roof === "match" ? body : hexToLinear(byId(COLORS, state.roof).hex);
+  const interior = hexToLinear(byId(INTERIORS, state.interior).hex);
+  const wheel = WHEEL_FINISH[state.wheels];
+  const wheelColor = hexToLinear(wheel.hex);
+  viewerApi.getMaterialList((err, materials) => {
+    if (err || request !== paintRequest || !materials) return;
+    if (!materialRoles) materialRoles = materials.map((material) => roleOf(material));
+    const groups = { body: [], roof: [], interior: [], wheel: [] };
+    materials.forEach((material, index) => {
+      const kind = materialRoles[index];
+      if (groups[kind]) groups[kind].push(material);
+    });
+    groups.body.forEach((material) => solidColor(material, body, 0.72, 0.28));
+    groups.roof.forEach((material) => solidColor(material, roof, 0.65, 0.32));
+    groups.interior.forEach((material) => solidColor(material, interior, 0.04, 0.58));
+    groups.wheel.forEach((material) => solidColor(material, wheelColor, wheel.metal, wheel.rough));
+  });
+}
+
+function bootViewer(car) {
+  const token = ++viewerToken;
+  viewerApi = null;
+  viewerReady = false;
+  materialRoles = null;
+  const iframe = document.querySelector(".viewer iframe");
+  if (!iframe || typeof Sketchfab !== "function") return;
+  const client = new Sketchfab(iframe);
+  client.init(car.model, {
+    autostart: 1,
+    preload: 1,
+    ui_infos: 0,
+    ui_help: 0,
+    ui_settings: 0,
+    ui_inspector: 0,
+    ui_vr: 0,
+    ui_annotations: 0,
+    dnt: 1,
+    success(api) {
+      if (token !== viewerToken) return;
+      viewerApi = api;
+      api.start();
+      api.addEventListener("viewerready", () => {
+        if (token !== viewerToken) return;
+        viewerReady = true;
+        applyDesign();
+      });
+    },
+  });
+}
+
 function render() {
   const car = carById(state.carId);
+  viewerToken += 1;
+  viewerApi = null;
+  viewerReady = false;
   app.innerHTML = car ? designer(car) : catalog();
+  if (car && state.view === "model") bootViewer(car);
 }
 
 function syncChoices() {
@@ -337,6 +467,7 @@ function syncChoices() {
   if (chosen[0]) chosen[0].textContent = `נבחר: ${byId(COLORS, state.body).name}`;
   if (chosen[1]) chosen[1].textContent = `נבחר: ${roofName()}`;
   if (chosen[2]) chosen[2].textContent = `נבחר: ${byId(INTERIORS, state.interior).name}`;
+  applyDesign();
   return true;
 }
 
